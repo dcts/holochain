@@ -1894,7 +1894,9 @@ version = "0.0.1"
 dependencies = [
  "arrayref",
  "byteorder",
+ "chrono",
  "kitsune_p2p",
+ "thiserror",
  "tokio",
  "tracing-subscriber",
 ]
