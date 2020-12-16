@@ -79,19 +79,49 @@ _repr_enum! {
     }
 }
 
-/// Kitsune P2p Direct one entry to rule them all
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KdEntry(Arc<Vec<u8>>);
+struct KdArcSwap<T>(ArcSwapOption<T>)
+where
+    T: std::fmt::Debug + Clone + PartialEq + Eq;
 
-impl From<Vec<u8>> for KdEntry {
-    fn from(v: Vec<u8>) -> Self {
-        Self(Arc::new(v))
+impl<T> KdArcSwap<T>
+where
+    T: std::fmt::Debug + Clone + PartialEq + Eq,
+{
+    pub fn new() -> Self {
+        Self(ArcSwapOption::new(None))
     }
 }
 
-impl From<Arc<Vec<u8>>> for KdEntry {
-    fn from(v: Arc<Vec<u8>>) -> Self {
-        Self(v)
+impl<T> std::fmt::Debug for KdArcSwap<T>
+where
+    T: std::fmt::Debug + Clone + PartialEq + Eq,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.0.load())
+    }
+}
+
+impl<T> std::cmp::PartialEq for KdArcSwap<T>
+where
+    T: std::fmt::Debug + Clone + PartialEq + Eq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        *self.0.load() == *other.0.load()
+    }
+}
+
+impl<T> std::cmp::Eq for KdArcSwap<T>
+where
+    T: std::fmt::Debug + Clone + PartialEq + Eq,
+{}
+
+/// Kitsune P2p Direct one entry to rule them all
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KdEntry(Arc<(Vec<u8>, KdArcSwap<serde_json::Value>, KdArcSwap<serde_json::Value>)>);
+
+impl From<Vec<u8>> for KdEntry {
+    fn from(v: Vec<u8>) -> Self {
+        Self(Arc::new((v, KdArcSwap::new(), KdArcSwap::new())))
     }
 }
 
@@ -99,19 +129,19 @@ impl std::ops::Deref for KdEntry {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.0.0
     }
 }
 
 impl AsRef<[u8]> for KdEntry {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.0.0
     }
 }
 
 impl std::borrow::Borrow<[u8]> for KdEntry {
     fn borrow(&self) -> &[u8] {
-        &self.0
+        &self.0.0
     }
 }
 
@@ -139,27 +169,27 @@ macro_rules! _impl_getters {
         impl $i {
             /// size/length of underlying raw bytes
             pub fn size(&self) -> u32 {
-                self.0.len() as u32
+                self.0.0.len() as u32
             }
 
             /// the content portion used for signatures / hashing
             pub fn sig_content(&self) -> &[u8] {
-                &self.0[SYS_TYPE_START..]
+                &self.0.0[SYS_TYPE_START..]
             }
 
             /// signature bytes
             pub fn signature(&self) -> &[u8; SIG_LEN] {
-                arrayref::array_ref![self.0, SIG_START, SIG_LEN]
+                arrayref::array_ref![self.0.0, SIG_START, SIG_LEN]
             }
 
             /// sys_type
             pub fn sys_type(&self) -> SysType {
-                self.0[SYS_TYPE_START].into()
+                self.0.0[SYS_TYPE_START].into()
             }
 
             /// create time in epoch millis
             pub fn create(&self) -> DateTime<Utc> {
-                let ms = (&self.0[CREATE_START..CREATE_START + CREATE_LEN])
+                let ms = (&self.0.0[CREATE_START..CREATE_START + CREATE_LEN])
                     .read_u64::<LittleEndian>()
                     .unwrap();
                 epoch_ms_to_chrono(ms)
@@ -167,7 +197,7 @@ macro_rules! _impl_getters {
 
             /// expire time in epoch millis
             pub fn expire(&self) -> DateTime<Utc> {
-                let ms = (&self.0[EXPIRE_START..EXPIRE_START + EXPIRE_LEN])
+                let ms = (&self.0.0[EXPIRE_START..EXPIRE_START + EXPIRE_LEN])
                     .read_u64::<LittleEndian>()
                     .unwrap();
                 epoch_ms_to_chrono(ms)
@@ -175,27 +205,43 @@ macro_rules! _impl_getters {
 
             /// author
             pub fn author(&self) -> &[u8; AUTHOR_LEN] {
-                arrayref::array_ref![self.0, AUTHOR_START, AUTHOR_LEN]
+                arrayref::array_ref![self.0.0, AUTHOR_START, AUTHOR_LEN]
             }
 
             /// left_link
             pub fn left_link(&self) -> &[u8; LEFT_LINK_LEN] {
-                arrayref::array_ref![self.0, LEFT_LINK_START, LEFT_LINK_LEN]
+                arrayref::array_ref![self.0.0, LEFT_LINK_START, LEFT_LINK_LEN]
             }
 
             /// right_link
             pub fn right_link(&self) -> &[u8; RIGHT_LINK_LEN] {
-                arrayref::array_ref![self.0, RIGHT_LINK_START, RIGHT_LINK_LEN]
+                arrayref::array_ref![self.0.0, RIGHT_LINK_START, RIGHT_LINK_LEN]
             }
 
             /// user_type
-            pub fn user_type(&self) -> &[u8; USER_TYPE_LEN] {
-                arrayref::array_ref![self.0, USER_TYPE_START, USER_TYPE_LEN]
+            pub fn user_type(&self) -> serde_json::Value {
+                if let Some(res) = &*self.0.1.0.load() {
+                    return (&**res).clone();
+                }
+                let res: serde_json::Value = {
+                    let bytes = &self.0.0[USER_TYPE_START..USER_TYPE_START+USER_TYPE_LEN];
+                    serde_json::from_slice(bytes).unwrap()
+                };
+                self.0.1.0.store(Some(Arc::new(res.clone())));
+                res
             }
 
             /// content
-            pub fn content(&self) -> &[u8] {
-                &self.0[CONTENT_START..]
+            pub fn content(&self) -> serde_json::Value {
+                if let Some(res) = &*self.0.2.0.load() {
+                    return (&**res).clone();
+                }
+                let res: serde_json::Value = {
+                    let bytes = &self.0.0[CONTENT_START..];
+                    serde_json::from_slice(bytes).unwrap()
+                };
+                self.0.2.0.store(Some(Arc::new(res.clone())));
+                res
             }
         }
     };
@@ -211,11 +257,11 @@ impl KdEntry {
 _impl_getters!(KdEntry);
 
 /// Builder for KdEntry struct instances
-pub struct KdEntryBuilder(Vec<u8>);
+pub struct KdEntryBuilder((Vec<u8>, KdArcSwap<serde_json::Value>, KdArcSwap<serde_json::Value>));
 
 impl Default for KdEntryBuilder {
     fn default() -> Self {
-        Self(vec![0; CONTENT_START])
+        Self((vec![0; CONTENT_START], KdArcSwap::new(), KdArcSwap::new()))
     }
 }
 
@@ -225,12 +271,12 @@ impl KdEntryBuilder {
     /// convert this builder into a KdEntry instance
     pub fn build(self) -> KdEntry {
         // TODO Validation / size setting, etc
-        KdEntry(Arc::new(self.0))
+        KdEntry(Arc::new((self.0.0, KdArcSwap::new(), KdArcSwap::new())))
     }
 
     /// set the signature data of this instance
     pub fn set_signature(mut self, signature: &[u8; SIG_LEN]) -> Self {
-        self
+        self.0
             .0[SIG_START..SIG_START+SIG_LEN]
             .copy_from_slice(signature);
         self
@@ -238,14 +284,14 @@ impl KdEntryBuilder {
 
     /// set the sys_type of this instance
     pub fn set_sys_type(mut self, sys_type: SysType) -> Self {
-        self.0[SYS_TYPE_START] = sys_type as u8;
+        self.0.0[SYS_TYPE_START] = sys_type as u8;
         self
     }
 
     /// set the create data of this instance
     pub fn set_create(mut self, create: DateTime<Utc>) -> Self {
         let ms = chrono_to_epoch_ms(create);
-        (&mut self.0[CREATE_START..CREATE_START + CREATE_LEN])
+        (&mut self.0.0[CREATE_START..CREATE_START + CREATE_LEN])
             .write_u64::<LittleEndian>(ms)
             .unwrap();
         self
@@ -254,7 +300,7 @@ impl KdEntryBuilder {
     /// set the expire data of this instance
     pub fn set_expire(mut self, expire: DateTime<Utc>) -> Self {
         let ms = chrono_to_epoch_ms(expire);
-        (&mut self.0[EXPIRE_START..EXPIRE_START + EXPIRE_LEN])
+        (&mut self.0.0[EXPIRE_START..EXPIRE_START + EXPIRE_LEN])
             .write_u64::<LittleEndian>(ms)
             .unwrap();
         self
@@ -262,7 +308,7 @@ impl KdEntryBuilder {
 
     /// set the author data of this instance
     pub fn set_author(mut self, author: &[u8; AUTHOR_LEN]) -> Self {
-        self
+        self.0
             .0[AUTHOR_START..AUTHOR_START+AUTHOR_LEN]
             .copy_from_slice(author);
         self
@@ -270,7 +316,7 @@ impl KdEntryBuilder {
 
     /// set the left_link data of this instance
     pub fn set_left_link(mut self, left_link: &[u8; LEFT_LINK_LEN]) -> Self {
-        self
+        self.0
             .0[LEFT_LINK_START..LEFT_LINK_START+LEFT_LINK_LEN]
             .copy_from_slice(left_link);
         self
@@ -278,28 +324,33 @@ impl KdEntryBuilder {
 
     /// set the right_link data of this instance
     pub fn set_right_link(mut self, right_link: &[u8; RIGHT_LINK_LEN]) -> Self {
-        self
+        self.0
             .0[RIGHT_LINK_START..RIGHT_LINK_START+RIGHT_LINK_LEN]
             .copy_from_slice(right_link);
         self
     }
 
     /// set the user_type data of this instance
-    pub fn set_user_type(mut self, user_type: &[u8; USER_TYPE_LEN]) -> Self {
-        self
+    pub fn set_user_type(mut self, user_type: serde_json::Value) -> Self {
+        let mut bytes = serde_json::to_vec(&user_type).unwrap();
+        bytes.resize(USER_TYPE_LEN, 0);
+        self.0
             .0[USER_TYPE_START..USER_TYPE_START+USER_TYPE_LEN]
-            .copy_from_slice(user_type);
+            .copy_from_slice(&bytes);
+        self.0.1.0.store(Some(Arc::new(user_type)));
         self
     }
 
     /// set the content for this instance
-    pub fn set_content(mut self, content: &[u8]) -> Self {
-        self.0.truncate(CONTENT_START);
-        self.0.extend_from_slice(content);
-        let size = self.0.len() as u32;
-        (&mut self.0[SIZE_START..SIZE_START + SIZE_LEN])
+    pub fn set_content(mut self, content: serde_json::Value) -> Self {
+        let bytes = serde_json::to_vec(&content).unwrap();
+        self.0.0.truncate(CONTENT_START);
+        self.0.0.extend_from_slice(&bytes);
+        let size = self.0.0.len() as u32;
+        (&mut self.0.0[SIZE_START..SIZE_START + SIZE_LEN])
             .write_u32::<LittleEndian>(size)
             .unwrap();
+        self.0.2.0.store(Some(Arc::new(content)));
         self
     }
 }

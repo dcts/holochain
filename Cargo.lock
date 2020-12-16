@@ -76,6 +76,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf8dcb5b4bbaa28653b647d8c77bd4ed40183b48882e130c1f1ffb73de069fd7"
 
 [[package]]
+name = "arc-swap"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec5a4539a733493f412c4d0bb962748ea1f90f3dfdba9ff3ee18acbefc3b33f0"
+
+[[package]]
 name = "arrayref"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1991,10 +1997,13 @@ dependencies = [
 name = "kitsune_p2p_direct"
 version = "0.0.1"
 dependencies = [
+ "arc-swap",
  "arrayref",
  "byteorder",
  "chrono",
  "kitsune_p2p",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing-subscriber",

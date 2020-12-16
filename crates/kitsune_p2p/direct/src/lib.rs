@@ -4,6 +4,7 @@
 #![forbid(warnings)]
 #![forbid(missing_docs)]
 
+use arc_swap::*;
 use std::sync::Arc;
 use kitsune_p2p::*;
 use actor::KitsuneP2pSender;
@@ -23,9 +24,14 @@ mod kd_actor;
 ghost_actor::ghost_chan! {
     /// Api for controlling Kitsune P2p Direct task
     pub chan KdApi<KdError> {
-        /// Spawns a memory-based (local-only) kitsune instance
-        /// into the Kd actor.
-        fn create_kitsune_mem() -> ();
+        /// Spawns a kitsune p2p node with given config directives.
+        ///
+        /// Example directives:
+        /// - "set_proxy_accept_all:"
+        /// - "bind_mem_local:"
+        /// - "bind_quic_local:kitnuse-quic://0.0.0.0:0"
+        /// - "bind_quic_proxy:kitsune-poxy://YADA.."
+        fn create_kitsune(config_directives: Vec<String>) -> ();
     }
 }
 
