@@ -9,7 +9,7 @@ async fn sanity() {
 
 async fn sanity_inner() -> KdResult<()> {
     let kd = spawn_kitsune_p2p_direct().await?;
-    kd.create_kitsune_mem().await?;
+    kd.create_kitsune(vec![]).await?;
 
     Ok(())
 }

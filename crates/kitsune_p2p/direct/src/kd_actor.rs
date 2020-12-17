@@ -1,18 +1,31 @@
 use crate::*;
 
+mod persist;
+use persist::*;
+
+mod keystore;
+pub use keystore::KdHash;
+use keystore::*;
+
 pub(crate) struct KdActor {
     channel_factory: ghost_actor::actor_builder::GhostActorChannelFactory<Self>,
     i_s: ghost_actor::GhostSender<Internal>,
+    keystore: KeystoreSender,
 }
 
 impl ghost_actor::GhostControlHandler for KdActor {}
 
 impl KdActor {
-    pub async fn new(channel_factory: ghost_actor::actor_builder::GhostActorChannelFactory<Self>) -> KdResult<Self> {
+    pub async fn new(
+        channel_factory: ghost_actor::actor_builder::GhostActorChannelFactory<Self>,
+    ) -> KdResult<Self> {
         let i_s = channel_factory.create_channel::<Internal>().await?;
+        let persist = spawn_persist().await?;
+        let keystore = spawn_keystore(persist).await?;
         Ok(KdActor {
             channel_factory,
             i_s,
+            keystore,
         })
     }
 }
@@ -41,7 +54,9 @@ impl InternalHandler for KdActor {
         Ok(async move {
             attach_fut.await?;
             Ok(())
-        }.boxed().into())
+        }
+        .boxed()
+        .into())
     }
 }
 
@@ -125,32 +140,35 @@ impl event::KitsuneP2pEventHandler for KdActor {
 impl ghost_actor::GhostHandler<KdApi> for KdActor {}
 
 impl KdApiHandler for KdActor {
-    fn handle_create_kitsune_mem(&mut self) -> KdApiHandlerResult<()> {
+    fn handle_create_kitsune(&mut self, _config_directives: Vec<String>) -> KdApiHandlerResult<()> {
         let i_s = self.i_s.clone();
         Ok(async move {
             let mut config = KitsuneP2pConfig::default();
 
-            config
-                .transport_pool
-                .push(TransportConfig::Proxy {
-                    sub_transport: Box::new(TransportConfig::Mem {}),
-                    proxy_config: ProxyConfig::LocalProxyServer {
-                        proxy_accept_config: Some(ProxyAcceptConfig::RejectAll),
-                    }
-                });
+            config.transport_pool.push(TransportConfig::Proxy {
+                sub_transport: Box::new(TransportConfig::Mem {}),
+                proxy_config: ProxyConfig::LocalProxyServer {
+                    proxy_accept_config: Some(ProxyAcceptConfig::RejectAll),
+                },
+            });
 
             let (p2p, evt) = spawn_kitsune_p2p(
                 config,
                 kitsune_p2p_proxy::TlsConfig::new_ephemeral().await.unwrap(),
-            ).await?;
+            )
+            .await?;
 
-            let bound_urls = p2p
-                .list_transport_bindings()
-                .await?;
+            let bound_urls = p2p.list_transport_bindings().await?;
 
             i_s.attach_kitsune(bound_urls, p2p, evt).await?;
 
             Ok(())
-        }.boxed().into())
+        }
+        .boxed()
+        .into())
+    }
+
+    fn handle_generate_agent(&mut self) -> KdApiHandlerResult<KdHash> {
+        Ok(self.keystore.generate_sign_agent())
     }
 }
