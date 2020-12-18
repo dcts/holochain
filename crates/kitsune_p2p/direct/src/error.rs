@@ -58,6 +58,12 @@ impl From<sodoken::SodokenError> for KdError {
     }
 }
 
+impl From<serde_json::Error> for KdError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::other(e)
+    }
+}
+
 /// Result type for remote communication.
 
 pub type KdResult<T> = Result<T, KdError>;

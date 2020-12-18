@@ -36,6 +36,10 @@ ghost_actor::ghost_chan! {
 
         /// Create a new signature agent for use with Kd
         fn generate_agent() -> KdHash;
+
+        /// Sign data with internally managed private key associated
+        /// with given pub key.
+        fn sign(pub_key: KdHash, data: sodoken::Buffer) -> Arc<[u8; 64]>;
     }
 }
 

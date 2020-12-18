@@ -20,7 +20,7 @@ kitsune_p2p = { version = "0.0.1", path = "../kitsune_p2p" }
 once_cell = "1.5.2"
 serde = { version = "1", features = [ "derive", "rc" ] }
 serde_json = { version = "1", features = [ "preserve_order" ] }
-sodoken = "=0.0.1-alpha.1"
+sodoken = "=0.0.1-alpha.2"
 thiserror = "1.0.22"
 tokio = { version = "0.2", features = [ "full" ] }
 

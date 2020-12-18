@@ -104,18 +104,18 @@ where
 
 impl<T> std::cmp::Eq for KdArcSwap<T> where T: std::fmt::Debug + Clone + PartialEq + Eq {}
 
-/// Kitsune P2p Direct one entry to rule them all
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KdEntry(
-    Arc<(
-        Vec<u8>,
-        KdArcSwap<serde_json::Value>,
-        KdArcSwap<serde_json::Value>,
-    )>,
+type KdEntryInner = (
+    Box<[u8]>,
+    KdArcSwap<serde_json::Value>,
+    KdArcSwap<serde_json::Value>,
 );
 
-impl From<Vec<u8>> for KdEntry {
-    fn from(v: Vec<u8>) -> Self {
+/// Kitsune P2p Direct one entry to rule them all
+#[derive(Clone, PartialEq, Eq)]
+pub struct KdEntry(Arc<KdEntryInner>);
+
+impl From<Box<[u8]>> for KdEntry {
+    fn from(v: Box<[u8]>) -> Self {
         Self(Arc::new((v, KdArcSwap::new(), KdArcSwap::new())))
     }
 }
@@ -140,24 +140,45 @@ impl std::borrow::Borrow<[u8]> for KdEntry {
     }
 }
 
+impl std::fmt::Debug for KdEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sig = base64::encode_config(self.signature(), base64::URL_SAFE_NO_PAD);
+        f.debug_struct("KdEntry")
+            .field("size", &self.size())
+            .field("hash", &self.hash())
+            .field("signature", &sig)
+            .field("sys_type", &self.sys_type())
+            .field("create", &self.create())
+            .field("expire", &self.expire())
+            .field("author", &self.author())
+            .field("left_link", &self.left_link())
+            .field("right_link", &self.right_link())
+            .field("user_type", &self.user_type())
+            .field("content", &self.content())
+            .finish()
+    }
+}
+
 const SIZE_START: usize = 0;
 const SIZE_LEN: usize = 4;
-const SIG_START: usize = 4;
+const HASH_START: usize = 4;
+const HASH_LEN: usize = 36;
+const SIG_START: usize = 40;
 const SIG_LEN: usize = 64;
-const SYS_TYPE_START: usize = 69;
-const CREATE_START: usize = 70;
+const SYS_TYPE_START: usize = 104;
+const CREATE_START: usize = 105;
 const CREATE_LEN: usize = 8;
-const EXPIRE_START: usize = 78;
+const EXPIRE_START: usize = 113;
 const EXPIRE_LEN: usize = 8;
-const AUTHOR_START: usize = 86;
+const AUTHOR_START: usize = 121;
 const AUTHOR_LEN: usize = 36;
-const LEFT_LINK_START: usize = 122;
+const LEFT_LINK_START: usize = 157;
 const LEFT_LINK_LEN: usize = 36;
-const RIGHT_LINK_START: usize = 158;
+const RIGHT_LINK_START: usize = 193;
 const RIGHT_LINK_LEN: usize = 36;
-const USER_TYPE_START: usize = 194;
+const USER_TYPE_START: usize = 229;
 const USER_TYPE_LEN: usize = 32;
-const CONTENT_START: usize = 226;
+const CONTENT_START: usize = 261;
 
 macro_rules! _impl_getters {
     ($i:ident) => {
@@ -170,6 +191,12 @@ macro_rules! _impl_getters {
             /// the content portion used for signatures / hashing
             pub fn sig_content(&self) -> &[u8] {
                 &self.0 .0[SYS_TYPE_START..]
+            }
+
+            /// hash
+            pub fn hash(&self) -> KdHash {
+                let r = arrayref::array_ref![self.0 .0, HASH_START, HASH_LEN];
+                KdHash::from_36_bytes_unchecked(r)
             }
 
             /// signature bytes
@@ -199,18 +226,21 @@ macro_rules! _impl_getters {
             }
 
             /// author
-            pub fn author(&self) -> &[u8; AUTHOR_LEN] {
-                arrayref::array_ref![self.0 .0, AUTHOR_START, AUTHOR_LEN]
+            pub fn author(&self) -> KdHash {
+                let r = arrayref::array_ref![self.0 .0, AUTHOR_START, AUTHOR_LEN];
+                KdHash::from_36_bytes_unchecked(r)
             }
 
             /// left_link
-            pub fn left_link(&self) -> &[u8; LEFT_LINK_LEN] {
-                arrayref::array_ref![self.0 .0, LEFT_LINK_START, LEFT_LINK_LEN]
+            pub fn left_link(&self) -> KdHash {
+                let r = arrayref::array_ref![self.0 .0, LEFT_LINK_START, LEFT_LINK_LEN];
+                KdHash::from_36_bytes_unchecked(r)
             }
 
             /// right_link
-            pub fn right_link(&self) -> &[u8; RIGHT_LINK_LEN] {
-                arrayref::array_ref![self.0 .0, RIGHT_LINK_START, RIGHT_LINK_LEN]
+            pub fn right_link(&self) -> KdHash {
+                let r = arrayref::array_ref![self.0 .0, RIGHT_LINK_START, RIGHT_LINK_LEN];
+                KdHash::from_36_bytes_unchecked(r)
             }
 
             /// user_type
@@ -218,10 +248,20 @@ macro_rules! _impl_getters {
                 if let Some(res) = &*self.0 .1 .0.load() {
                     return (&**res).clone();
                 }
-                let res: serde_json::Value = {
-                    let bytes = &self.0 .0[USER_TYPE_START..USER_TYPE_START + USER_TYPE_LEN];
-                    serde_json::from_slice(bytes).unwrap()
-                };
+                let res: serde_json::Value = (|| {
+                    let len = self.0 .0[USER_TYPE_START] as usize;
+                    if len > 31 || len == 0 {
+                        return serde_json::Value::Null;
+                    }
+                    let bytes = &self.0 .0[USER_TYPE_START + 1..USER_TYPE_START + 1 + len];
+                    match serde_json::from_slice(bytes) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            println!("READ USER TYPE ERROR: {:?}", e);
+                            serde_json::Value::Null
+                        }
+                    }
+                })();
                 self.0 .1 .0.store(Some(Arc::new(res.clone())));
                 res
             }
@@ -233,7 +273,10 @@ macro_rules! _impl_getters {
                 }
                 let res: serde_json::Value = {
                     let bytes = &self.0 .0[CONTENT_START..];
-                    serde_json::from_slice(bytes).unwrap()
+                    match serde_json::from_slice(bytes) {
+                        Ok(v) => v,
+                        Err(_) => serde_json::Value::Null,
+                    }
                 };
                 self.0 .2 .0.store(Some(Arc::new(res.clone())));
                 res
@@ -243,6 +286,50 @@ macro_rules! _impl_getters {
 }
 
 impl KdEntry {
+    /// Validated load from raw bytes
+    pub async fn from_raw_bytes_validated(b: Box<[u8]>, _pub_key: KdHash) -> KdResult<Self> {
+        let entry = Self(Arc::new((b, KdArcSwap::new(), KdArcSwap::new())));
+
+        // check the size data
+        if entry.size() as usize != entry.sig_content().len() + SYS_TYPE_START {
+            return Err(format!("invalid size data: {}", entry.size()).into());
+        }
+
+        // check the total size is within bounds
+        if entry.size() > 1024 * 1024 {
+            return Err(format!(
+                "entry must fit within 1MiB, content must be != {} bytes",
+                1024 * 1024 - CONTENT_START
+            )
+            .into());
+        }
+
+        // check the content/sig hash
+        let hash = KdHash::from_data(entry.sig_content()).await?;
+        if hash != entry.hash() {
+            return Err("Invalid entry hash".into());
+        }
+
+        // check the signature
+        let data = sodoken::Buffer::from_ref(entry.sig_content());
+        if !entry
+            .author()
+            .verify_signature(data, Arc::new(*entry.signature()))
+            .await
+        {
+            return Err("Invalid signature".into());
+        }
+
+        // check expire
+        let now = Utc::now();
+        if entry.expire() < now {
+            return Err(format!("entry expired {}", entry.expire()).into());
+        }
+
+        // TODO Validation / size setting, etc
+        Ok(entry)
+    }
+
     /// create a new builder for KdEntry instances
     pub fn builder() -> KdEntryBuilder {
         KdEntryBuilder::default()
@@ -270,13 +357,39 @@ _impl_getters!(KdEntryBuilder);
 
 impl KdEntryBuilder {
     /// convert this builder into a KdEntry instance
-    pub fn build(self) -> KdEntry {
-        // TODO Validation / size setting, etc
-        KdEntry(Arc::new((self.0 .0, KdArcSwap::new(), KdArcSwap::new())))
+    pub async fn build(self, pub_key: KdHash, kd: KdSender) -> KdResult<KdEntry> {
+        let mut this = self;
+
+        this = this.set_create(Utc::now());
+
+        this = this.set_author(&pub_key);
+
+        let hash = KdHash::from_data(this.sig_content()).await?;
+        let hash = hash.get_raw_bytes();
+        let hash = arrayref::array_ref![hash, 3, 36];
+        this = this.set_hash(hash);
+
+        let sig = kd
+            .sign(
+                pub_key.clone(),
+                sodoken::Buffer::from_ref(this.sig_content()),
+            )
+            .await?;
+        this = this.set_signature(&sig);
+
+        KdEntry::from_raw_bytes_validated(this.0 .0.into_boxed_slice(), pub_key).await
+    }
+
+    /// set the hash data of this instance
+    /// PRIVATE since we really only should do this as part of build
+    fn set_hash(mut self, hash: &[u8; HASH_LEN]) -> Self {
+        self.0 .0[HASH_START..HASH_START + HASH_LEN].copy_from_slice(hash);
+        self
     }
 
     /// set the signature data of this instance
-    pub fn set_signature(mut self, signature: &[u8; SIG_LEN]) -> Self {
+    /// PRIVATE since we really only should do this as part of build
+    fn set_signature(mut self, signature: &[u8; SIG_LEN]) -> Self {
         self.0 .0[SIG_START..SIG_START + SIG_LEN].copy_from_slice(signature);
         self
     }
@@ -288,7 +401,8 @@ impl KdEntryBuilder {
     }
 
     /// set the create data of this instance
-    pub fn set_create(mut self, create: DateTime<Utc>) -> Self {
+    /// PRIVATE since we really only should do this as part of build
+    fn set_create(mut self, create: DateTime<Utc>) -> Self {
         let ms = chrono_to_epoch_ms(create);
         (&mut self.0 .0[CREATE_START..CREATE_START + CREATE_LEN])
             .write_u64::<LittleEndian>(ms)
@@ -306,30 +420,39 @@ impl KdEntryBuilder {
     }
 
     /// set the author data of this instance
-    pub fn set_author(mut self, author: &[u8; AUTHOR_LEN]) -> Self {
+    /// PRIVATE since we really only should do this as part of build
+    fn set_author(mut self, author: &KdHash) -> Self {
+        let author = &author.get_raw_bytes()[3..];
         self.0 .0[AUTHOR_START..AUTHOR_START + AUTHOR_LEN].copy_from_slice(author);
         self
     }
 
     /// set the left_link data of this instance
-    pub fn set_left_link(mut self, left_link: &[u8; LEFT_LINK_LEN]) -> Self {
+    pub fn set_left_link(mut self, left_link: &KdHash) -> Self {
+        let left_link = &left_link.get_raw_bytes()[3..];
         self.0 .0[LEFT_LINK_START..LEFT_LINK_START + LEFT_LINK_LEN].copy_from_slice(left_link);
         self
     }
 
     /// set the right_link data of this instance
-    pub fn set_right_link(mut self, right_link: &[u8; RIGHT_LINK_LEN]) -> Self {
+    pub fn set_right_link(mut self, right_link: &KdHash) -> Self {
+        let right_link = &right_link.get_raw_bytes()[3..];
         self.0 .0[RIGHT_LINK_START..RIGHT_LINK_START + RIGHT_LINK_LEN].copy_from_slice(right_link);
         self
     }
 
     /// set the user_type data of this instance
-    pub fn set_user_type(mut self, user_type: serde_json::Value) -> Self {
-        let mut bytes = serde_json::to_vec(&user_type).unwrap();
-        bytes.resize(USER_TYPE_LEN, 0);
-        self.0 .0[USER_TYPE_START..USER_TYPE_START + USER_TYPE_LEN].copy_from_slice(&bytes);
+    pub fn set_user_type(mut self, user_type: serde_json::Value) -> KdResult<Self> {
+        let mut bytes = serde_json::to_vec(&user_type)?;
+        if bytes.len() > 31 {
+            return Err("user type must fit in 31 bytes".into());
+        }
+        self.0 .0[USER_TYPE_START] = bytes.len() as u8;
+        bytes.resize(USER_TYPE_LEN - 1, 0);
+        self.0 .0[USER_TYPE_START + 1..USER_TYPE_START + 1 + USER_TYPE_LEN - 1]
+            .copy_from_slice(&bytes);
         self.0 .1 .0.store(Some(Arc::new(user_type)));
-        self
+        Ok(self)
     }
 
     /// set the content for this instance
@@ -348,6 +471,58 @@ impl KdEntryBuilder {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[tokio::test]
-    async fn sanity() {}
+    async fn minimal() -> KdResult<()> {
+        let kd = spawn_kitsune_p2p_direct().await?;
+
+        let pk = kd.generate_agent().await?;
+
+        let e = KdEntry::builder()
+            .set_expire(Utc::now() + chrono::Duration::weeks(2))
+            .build(pk, kd)
+            .await?;
+
+        println!("{:#?}", e);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn content() -> KdResult<()> {
+        let kd = spawn_kitsune_p2p_direct().await?;
+
+        let pk = kd.generate_agent().await?;
+
+        let other_hash = KdHash::from_bytes(&[0xdb; 32]).await?;
+
+        let e = KdEntry::builder()
+            .set_sys_type(SysType::Create)
+            .set_expire(Utc::now() + chrono::Duration::weeks(2))
+            .set_left_link(&other_hash)
+            .set_right_link(&other_hash)
+            .set_user_type(serde_json::json!("test-type"))?
+            .set_content(serde_json::json!({
+                "age": 42,
+                "fruit": ["banana", "grape"]
+            }))
+            .build(pk, kd)
+            .await?;
+
+        assert_eq!(serde_json::json!("test-type"), e.user_type());
+        assert_eq!(
+            serde_json::json!({
+                "age": 42,
+                "fruit": ["banana", "grape"]
+            }),
+            e.content()
+        );
+        assert_eq!(other_hash, e.left_link());
+        assert_eq!(other_hash, e.right_link());
+
+        println!("{:#?}", e);
+
+        Ok(())
+    }
 }

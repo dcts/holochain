@@ -171,4 +171,12 @@ impl KdApiHandler for KdActor {
     fn handle_generate_agent(&mut self) -> KdApiHandlerResult<KdHash> {
         Ok(self.keystore.generate_sign_agent())
     }
+
+    fn handle_sign(
+        &mut self,
+        pub_key: KdHash,
+        data: sodoken::Buffer,
+    ) -> KdApiHandlerResult<Arc<[u8; 64]>> {
+        Ok(self.keystore.sign(pub_key, data))
+    }
 }

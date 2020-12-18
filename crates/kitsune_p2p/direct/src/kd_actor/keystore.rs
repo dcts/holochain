@@ -1,6 +1,33 @@
 use super::*;
 use sodoken::*;
 
+ghost_actor::ghost_chan! {
+    pub(crate) chan KeystoreApi<KdError> {
+        fn generate_sign_agent() -> KdHash;
+        fn sign(pk: KdHash, data: sodoken::Buffer) -> Arc<[u8; 64]>;
+    }
+}
+
+pub(crate) type KeystoreSender = ghost_actor::GhostSender<KeystoreApi>;
+
+pub(crate) async fn spawn_keystore(persist: PersistSender) -> KdResult<KeystoreSender> {
+    let builder = ghost_actor::actor_builder::GhostActorBuilder::new();
+
+    let sender = builder
+        .channel_factory()
+        .create_channel::<KeystoreApi>()
+        .await?;
+
+    let i_s = builder
+        .channel_factory()
+        .create_channel::<Internal>()
+        .await?;
+
+    tokio::task::spawn(builder.spawn(Keystore::new(i_s, persist)));
+
+    Ok(sender)
+}
+
 // multihash-like prefixes
 //kDAk 6160 <Buffer 90 30 24> <-- using this for KdHash
 //kDEk 6288 <Buffer 90 31 24>
@@ -42,7 +69,7 @@ async fn loc_hash(d: &[u8]) -> KdResult<[u8; 4]> {
 }
 
 /// Hash type used by Kd
-#[derive(Debug, Clone, Eq)]
+#[derive(Clone, Eq)]
 pub struct KdHash(Arc<(String, once_cell::sync::OnceCell<[u8; 39]>)>);
 
 impl std::cmp::PartialEq for KdHash {
@@ -75,6 +102,12 @@ impl AsRef<str> for KdHash {
     }
 }
 
+impl std::fmt::Debug for KdHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("KdHash").field(&self.0 .0).finish()
+    }
+}
+
 impl std::fmt::Display for KdHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0 .0.fmt(f)
@@ -82,6 +115,17 @@ impl std::fmt::Display for KdHash {
 }
 
 impl KdHash {
+    /// hash the given data to produce a valid KdHash.
+    pub async fn from_data<R: AsRef<[u8]>>(r: R) -> KdResult<Self> {
+        let r = r.as_ref();
+        let r = Buffer::from_ref(r);
+
+        let mut hash = Buffer::new(32);
+        hash::generichash(&mut hash, &r, None).await?;
+
+        Self::from_bytes(hash.read_lock()).await
+    }
+
     /// create a validated KdHash from an AsRef<str> item.
     pub async fn from_str<R: AsRef<str>>(r: R) -> KdResult<Self> {
         let r = r.as_ref();
@@ -141,6 +185,18 @@ impl KdHash {
         ))))
     }
 
+    /// create an UNVALIDATED KdHash from raw bytes.
+    /// This is really only meant to be used internally from
+    /// sources that were previously validated.
+    pub fn from_36_bytes_unchecked(r: &[u8; 36]) -> Self {
+        let s = format!(
+            "u{}{}",
+            base64::encode_config(&[0x90, 0x30, 0x24], base64::URL_SAFE_NO_PAD),
+            base64::encode_config(r, base64::URL_SAFE_NO_PAD),
+        );
+        Self(Arc::new((s, once_cell::sync::OnceCell::new())))
+    }
+
     /// get the raw bytes underlying this hash instance
     pub fn get_raw_bytes(&self) -> &[u8; 39] {
         self.0 .1.get_or_init(|| {
@@ -176,13 +232,20 @@ impl KdHash {
             + ((bytes[37] as u32) << 16)
             + ((bytes[38] as u32) << 24)
     }
-}
 
-ghost_actor::ghost_chan! {
-    pub(crate) chan KeystoreApi<KdError> {
-        fn generate_sign_agent() -> KdHash;
-        fn sign(pk: KdHash, data: Arc<Vec<u8>>) -> Arc<[u8; 64]>;
-        fn verify(pk: KdHash, data: Arc<Vec<u8>>, sig: Arc<[u8; 64]>) -> bool;
+    /// assuming this KdHash is a pub_key - validate the
+    /// given signature applies to given data.
+    pub async fn verify_signature(&self, data: sodoken::Buffer, signature: Arc<[u8; 64]>) -> bool {
+        match async {
+            let pk = self.get_sodoken();
+            let sig = Buffer::from_ref(&*signature);
+            KdResult::Ok(sign::sign_verify_detached(&sig, &data, &pk).await?)
+        }
+        .await
+        {
+            Ok(r) => r,
+            Err(_) => false,
+        }
     }
 }
 
@@ -190,26 +253,6 @@ ghost_actor::ghost_chan! {
     chan Internal<KdError> {
         fn finalize_agent(pk: KdHash, sk: Buffer) -> ();
     }
-}
-
-pub(crate) type KeystoreSender = ghost_actor::GhostSender<KeystoreApi>;
-
-pub(crate) async fn spawn_keystore(persist: PersistSender) -> KdResult<KeystoreSender> {
-    let builder = ghost_actor::actor_builder::GhostActorBuilder::new();
-
-    let sender = builder
-        .channel_factory()
-        .create_channel::<KeystoreApi>()
-        .await?;
-
-    let i_s = builder
-        .channel_factory()
-        .create_channel::<Internal>()
-        .await?;
-
-    tokio::task::spawn(builder.spawn(Keystore::new(i_s, persist)));
-
-    Ok(sender)
 }
 
 struct Keystore {
@@ -262,33 +305,16 @@ impl KeystoreApiHandler for Keystore {
     fn handle_sign(
         &mut self,
         pk: KdHash,
-        data: Arc<Vec<u8>>,
+        data: sodoken::Buffer,
     ) -> KeystoreApiHandlerResult<Arc<[u8; 64]>> {
         let sk_fut = self.persist.get_sign_secret(pk);
         Ok(async move {
             let sk = sk_fut.await?;
             let mut sig = Buffer::new(64);
-            let data = Buffer::from(data.to_vec());
             sign::sign_detached(&mut sig, &data, &sk).await?;
             let mut out = [0; 64];
             out.copy_from_slice(&*sig.read_lock());
             Ok(Arc::new(out))
-        }
-        .boxed()
-        .into())
-    }
-
-    fn handle_verify(
-        &mut self,
-        pk: KdHash,
-        data: Arc<Vec<u8>>,
-        sig: Arc<[u8; 64]>,
-    ) -> KeystoreApiHandlerResult<bool> {
-        Ok(async move {
-            let sig = Buffer::from(sig.to_vec());
-            let data = Buffer::from(data.to_vec());
-            let pk = pk.get_sodoken();
-            Ok(sign::sign_verify_detached(&sig, &data, &pk).await?)
         }
         .boxed()
         .into())
@@ -305,9 +331,9 @@ mod tests {
         let keystore = spawn_keystore(persist).await?;
 
         let pk = keystore.generate_sign_agent().await?;
-        let data = Arc::new(b"test".to_vec());
+        let data = Buffer::from_ref(b"test");
         let sig = keystore.sign(pk.clone(), data.clone()).await?;
-        assert!(keystore.verify(pk, data, sig).await?);
+        assert!(pk.verify_signature(data, sig).await);
 
         Ok(())
     }
