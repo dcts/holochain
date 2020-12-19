@@ -46,12 +46,27 @@ ghost_actor::ghost_chan! {
 /// Kitsune P2p Direct Sender Type
 pub type KdSender = ghost_actor::GhostSender<KdApi>;
 
+/// Kitsune P2p Direct Config
+/// Most Kd config lives in the live persistance store,
+/// but, to bootstrap, we need two things:
+/// - the store path (or None if we shouldn't persist - i.e. for testing)
+/// - the unlock passphrase to use for encrypting / decrypting persisted data
+pub struct KdConfig {
+    /// Where to store the Kd persistence data on disk
+    /// (None to not persist - will keep in memory - be wary of mem usage)
+    pub persist_path: Option<std::path::PathBuf>,
+
+    /// User supplied passphrase for encrypting persistance
+    /// USE `sodoken::Buffer::new_memlocked()` TO KEEP SECURE!
+    pub unlock_passphrase: sodoken::Buffer,
+}
+
 /// spawn a Kitsune P2p Direct actor
-pub async fn spawn_kitsune_p2p_direct() -> KdResult<KdSender> {
+pub async fn spawn_kitsune_p2p_direct(config: KdConfig) -> KdResult<KdSender> {
     let builder = ghost_actor::actor_builder::GhostActorBuilder::new();
     let channel_factory = builder.channel_factory().clone();
     let sender = channel_factory.create_channel::<KdApi>().await?;
-    tokio::task::spawn(builder.spawn(kd_actor::KdActor::new(channel_factory).await?));
+    tokio::task::spawn(builder.spawn(kd_actor::KdActor::new(config, channel_factory).await?));
     Ok(sender)
 }
 

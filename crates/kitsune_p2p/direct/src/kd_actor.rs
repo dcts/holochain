@@ -17,10 +17,11 @@ impl ghost_actor::GhostControlHandler for KdActor {}
 
 impl KdActor {
     pub async fn new(
+        config: KdConfig,
         channel_factory: ghost_actor::actor_builder::GhostActorChannelFactory<Self>,
     ) -> KdResult<Self> {
         let i_s = channel_factory.create_channel::<Internal>().await?;
-        let persist = spawn_persist().await?;
+        let persist = spawn_persist(config).await?;
         let keystore = spawn_keystore(persist).await?;
         Ok(KdActor {
             channel_factory,

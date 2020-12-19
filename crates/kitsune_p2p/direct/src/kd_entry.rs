@@ -475,7 +475,11 @@ mod tests {
 
     #[tokio::test]
     async fn minimal() -> KdResult<()> {
-        let kd = spawn_kitsune_p2p_direct().await?;
+        let kd = spawn_kitsune_p2p_direct(KdConfig {
+            persist_path: None,
+            unlock_passphrase: sodoken::Buffer::new_memlocked(4)?,
+        })
+        .await?;
 
         let pk = kd.generate_agent().await?;
 
@@ -491,7 +495,11 @@ mod tests {
 
     #[tokio::test]
     async fn content() -> KdResult<()> {
-        let kd = spawn_kitsune_p2p_direct().await?;
+        let kd = spawn_kitsune_p2p_direct(KdConfig {
+            persist_path: None,
+            unlock_passphrase: sodoken::Buffer::new_memlocked(4)?,
+        })
+        .await?;
 
         let pk = kd.generate_agent().await?;
 

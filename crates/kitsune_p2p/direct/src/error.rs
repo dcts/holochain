@@ -64,6 +64,12 @@ impl From<serde_json::Error> for KdError {
     }
 }
 
+impl From<rusqlite::Error> for KdError {
+    fn from(e: rusqlite::Error) -> Self {
+        Self::other(e)
+    }
+}
+
 /// Result type for remote communication.
 
 pub type KdResult<T> = Result<T, KdError>;

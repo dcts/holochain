@@ -327,7 +327,11 @@ mod tests {
 
     #[tokio::test]
     async fn sign_and_verify() -> KdResult<()> {
-        let persist = spawn_persist().await?;
+        let persist = spawn_persist(KdConfig {
+            persist_path: None,
+            unlock_passphrase: sodoken::Buffer::new_memlocked(4)?,
+        })
+        .await?;
         let keystore = spawn_keystore(persist).await?;
 
         let pk = keystore.generate_sign_agent().await?;
