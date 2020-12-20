@@ -1,5 +1,6 @@
-use super::CoolConductorHandle;
+use super::{CoolConductorHandle, CoolConductorInner};
 use hdk3::prelude::*;
+use parking_lot::Mutex;
 use std::sync::{Arc, Weak};
 
 /// A reference to a Zome in a Cell created by a CoolConductor installation function.
@@ -8,7 +9,7 @@ use std::sync::{Arc, Weak};
 pub struct CoolZome {
     cell_id: CellId,
     zome_name: ZomeName,
-    handle: Weak<CoolConductorHandle>,
+    parent: Weak<Mutex<CoolConductorInner>>,
 }
 
 impl CoolZome {
@@ -52,11 +53,11 @@ impl CoolZome {
             .await
     }
 
-    fn handle(&self) -> Arc<CoolConductorHandle> {
-        if let Some(handle) = self.handle.upgrade() {
-            handle
+    fn handle(&self) -> CoolConductorHandle {
+        if let Some(parent) = self.parent.upgrade() {
+            parent.lock().handle()
         } else {
-            panic!(format!("Attempted to access conductor handle for zome {} in CellId {}, but the conductor is shutdown", self.zome_name, self.cell_id));
+            panic!(format!("Attempted to access conductor parent for zome {} in CellId {}, but the conductor is shutdown", self.zome_name, self.cell_id));
         }
     }
 }

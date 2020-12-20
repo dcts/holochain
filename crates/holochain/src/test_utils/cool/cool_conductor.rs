@@ -17,12 +17,12 @@ use holochain_types::app::InstalledCell;
 use holochain_types::dna::zome::Zome;
 use holochain_types::dna::DnaFile;
 use kitsune_p2p::KitsuneP2pConfig;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use unwrap_to::unwrap_to;
 
 /// A collection of CoolConductors, with methods for operating on the entire collection
 #[derive(
-    Clone,
     derive_more::AsRef,
     derive_more::From,
     derive_more::Into,
@@ -119,52 +119,40 @@ impl CoolConductorBatch {
 
 /// A useful Conductor abstraction for testing, allowing startup and shutdown as well
 /// as easy installation of apps across multiple Conductors and Agents.
-#[derive(Clone, derive_more::From)]
-pub struct CoolConductor {
-    handle: Option<Arc<CoolConductorHandle>>,
+///
+/// It wraps an inner implementation so that CoolCells can hold a weak reference
+/// for more convenient cell-specific conductor interaction, especially for zome calls
+pub struct CoolConductor(Arc<Mutex<CoolConductorInner>>);
+
+/// The
+pub struct CoolConductorInner {
+    handle: Option<CoolConductorHandle>,
     envs: TestEnvironments,
     config: ConductorConfig,
-    dnas: Arc<std::sync::Mutex<Vec<DnaFile>>>,
-}
-
-/// A wrapper around ConductorHandle with more convenient methods for testing
-/// and a cleanup drop
-#[derive(shrinkwraprs::Shrinkwrap, derive_more::From)]
-pub struct CoolConductorHandle(pub(crate) ConductorHandle);
-
-fn standard_config() -> ConductorConfig {
-    let mut network = KitsuneP2pConfig::default();
-    network.transport_pool = vec![kitsune_p2p::TransportConfig::Quic {
-        bind_to: None,
-        override_host: None,
-        override_port: None,
-    }];
-    ConductorConfig {
-        network: Some(network),
-        ..Default::default()
-    }
+    dnas: Arc<Mutex<Vec<DnaFile>>>,
 }
 
 impl CoolConductor {
-    /// Create a CoolConductor from an already-build ConductorHandle and environments
+    /// Create a CoolConductor from an already-built ConductorHandle
     pub fn new(
         handle: ConductorHandle,
         envs: TestEnvironments,
         config: ConductorConfig,
     ) -> CoolConductor {
-        let handle = Arc::new(CoolConductorHandle(handle));
-        Self {
+        let handle = CoolConductorHandle(handle);
+        let inner = CoolConductorInner {
             handle: Some(handle),
             envs,
             config,
-            dnas: Arc::new(std::sync::Mutex::new(Vec::new())),
-        }
+            dnas: Arc::new(Mutex::new(Vec::new())),
+        };
+        CoolConductor(Arc::new(Mutex::new(inner)))
     }
 
     /// Create a CoolConductor with a new set of TestEnvironments from the given config
     pub async fn from_config(config: ConductorConfig) -> CoolConductor {
         let envs = test_environments();
-        let handle = Self::from_existing(&envs, &config).await;
+        let handle = Self::from_existing(&envs, config.clone()).await;
         Self::new(handle, envs, config)
     }
 
@@ -179,9 +167,9 @@ impl CoolConductor {
     }
 
     /// Create a handle from an existing environment and config
-    async fn from_existing(envs: &TestEnvironments, config: &ConductorConfig) -> ConductorHandle {
+    async fn from_existing(envs: &TestEnvironments, config: ConductorConfig) -> ConductorHandle {
         Conductor::builder()
-            .config(config.clone())
+            .config(config)
             .test(envs)
             .await
             .unwrap()
@@ -193,13 +181,18 @@ impl CoolConductor {
     }
 
     /// Access the TestEnvironments for this conductor
-    pub fn envs(&self) -> &TestEnvironments {
-        &self.envs
+    pub fn envs(&self) -> TestEnvironments {
+        self.0.lock().envs.clone()
+    }
+
+    /// Access the TestEnvironments for this conductor
+    pub fn config(&self) -> ConductorConfig {
+        self.0.lock().config.clone()
     }
 
     /// Access the KeystoreSender for this conductor
     pub fn keystore(&self) -> KeystoreSender {
-        self.envs.keystore()
+        self.0.lock().envs.keystore()
     }
 
     /// TODO: make this take a more flexible config for specifying things like
@@ -212,11 +205,15 @@ impl CoolConductor {
     ) -> CoolApp {
         let installed_app_id = installed_app_id.to_string();
 
-        for dna_file in dna_files {
-            self.install_dna(dna_file.clone())
-                .await
-                .expect("Could not install DNA");
-            self.dnas.lock().unwrap().push(dna_file.clone());
+        {
+            let lock = self.0.lock();
+            for dna_file in dna_files {
+                lock.handle()
+                    .install_dna(dna_file.clone())
+                    .await
+                    .expect("Could not install DNA");
+                lock.dnas.lock().push(dna_file.clone());
+            }
         }
 
         let cool_cells: Vec<CoolCell> = dna_files
@@ -224,7 +221,7 @@ impl CoolConductor {
             .map(|dna| CellId::new(dna.dna_hash().clone(), agent.clone()))
             .map(|cell_id| CoolCell {
                 cell_id,
-                handle: Arc::downgrade(&self.handle()),
+                parent: Arc::downgrade(&self.0),
             })
             .collect();
         let installed_cells = cool_cells
@@ -260,11 +257,14 @@ impl CoolConductor {
             .setup_app_inner(installed_app_id, agent, dna_files)
             .await;
 
-        self.activate_app(app.installed_app_id().clone())
+        let handle = self.0.lock().handle();
+
+        handle
+            .activate_app(app.installed_app_id().clone())
             .await
             .expect("Could not activate app");
 
-        self.handle()
+        handle
             .0
             .clone()
             .setup_cells()
@@ -307,13 +307,16 @@ impl CoolConductor {
             apps.push(app);
         }
 
+        let handle = self.0.lock().handle().clone();
+
         for app in apps.iter() {
-            self.activate_app(app.installed_app_id().clone())
+            handle
+                .activate_app(app.installed_app_id().clone())
                 .await
                 .expect("Could not activate app");
         }
 
-        self.handle()
+        handle
             .0
             .clone()
             .setup_cells()
@@ -329,7 +332,7 @@ impl CoolConductor {
     ///
     /// Using this conductor without starting it up again will panic.
     pub async fn shutdown(&mut self) {
-        if let Some(handle) = self.handle.take() {
+        if let Some(handle) = self.0.lock().handle.take() {
             handle.wait_for_shutdown().await;
         } else {
             panic!("Attempted to shutdown conductor which was already shutdown");
@@ -338,14 +341,15 @@ impl CoolConductor {
 
     /// Start up this conductor if it's not already running.
     pub async fn startup(&mut self) {
-        if self.handle.is_none() {
-            self.handle = Some(Arc::new(CoolConductorHandle(
-                Self::from_existing(&self.envs, &self.config).await,
-            )));
+        let mut lock = self.0.lock();
+        if lock.handle.is_none() {
+            lock.handle = Some(CoolConductorHandle(
+                Self::from_existing(&self.envs(), self.config()).await,
+            ));
 
             // MD: this feels wrong, why should we have to reinstall DNAs on restart?
 
-            for dna_file in self.dnas.lock().unwrap().iter() {
+            for dna_file in lock.dnas.lock().iter() {
                 self.install_dna(dna_file.clone())
                     .await
                     .expect("Could not install DNA");
@@ -357,14 +361,39 @@ impl CoolConductor {
 
     /// Check if this conductor is running
     pub fn is_running(&self) -> bool {
-        self.handle.is_some()
+        self.0.lock().handle.is_some()
     }
 
     // NB: keep this private to prevent leaking out owned references
-    fn handle(&self) -> Arc<CoolConductorHandle> {
+    pub(super) fn handle(&self) -> CoolConductorHandle {
+        self.0.lock().handle()
+    }
+}
+
+impl CoolConductorInner {
+    // NB: keep this private to prevent leaking out owned references
+    pub(super) fn handle(&self) -> CoolConductorHandle {
         self.handle
             .clone()
             .expect("Tried to use a conductor that is offline")
+    }
+}
+
+/// A wrapper around ConductorHandle with more convenient methods for testing
+/// and a cleanup drop
+#[derive(Clone, shrinkwraprs::Shrinkwrap, derive_more::From)]
+pub struct CoolConductorHandle(pub(crate) ConductorHandle);
+
+fn standard_config() -> ConductorConfig {
+    let mut network = KitsuneP2pConfig::default();
+    network.transport_pool = vec![kitsune_p2p::TransportConfig::Quic {
+        bind_to: None,
+        override_host: None,
+        override_port: None,
+    }];
+    ConductorConfig {
+        network: Some(network),
+        ..Default::default()
     }
 }
 
@@ -517,25 +546,31 @@ impl Drop for CoolConductorHandle {
 //     }
 // }
 
-impl AsRef<Arc<CoolConductorHandle>> for CoolConductor {
-    fn as_ref(&self) -> &Arc<CoolConductorHandle> {
-        self.handle
+impl AsRef<CoolConductorHandle> for CoolConductor {
+    fn as_ref(&self) -> &CoolConductorHandle {
+        self.0
+            .lock()
+            .handle
             .as_ref()
             .expect("Tried to use a conductor that is offline")
     }
 }
 impl std::ops::Deref for CoolConductor {
-    type Target = Arc<CoolConductorHandle>;
+    type Target = CoolConductorHandle;
 
     fn deref(&self) -> &Self::Target {
-        self.handle
+        self.0
+            .lock()
+            .handle
             .as_ref()
             .expect("Tried to use a conductor that is offline")
     }
 }
-impl std::borrow::Borrow<Arc<CoolConductorHandle>> for CoolConductor {
-    fn borrow(&self) -> &Arc<CoolConductorHandle> {
-        self.handle
+impl std::borrow::Borrow<CoolConductorHandle> for CoolConductor {
+    fn borrow(&self) -> &CoolConductorHandle {
+        self.0
+            .lock()
+            .handle
             .as_ref()
             .expect("Tried to use a conductor that is offline")
     }

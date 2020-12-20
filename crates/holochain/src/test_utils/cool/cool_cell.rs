@@ -1,15 +1,16 @@
-use super::{CoolConductorHandle, CoolZome};
+use super::{CoolConductorHandle, CoolConductorInner, CoolZome};
 use hdk3::prelude::*;
 use holo_hash::DnaHash;
 use holochain_state::env::EnvironmentWrite;
-use std::sync::{Arc, Weak};
+use parking_lot::Mutex;
+use std::sync::Weak;
 
 /// A reference to a Cell created by a CoolConductor installation function.
 /// It has very concise methods for calling a zome on this cell
 #[derive(Clone, derive_more::Constructor)]
 pub struct CoolCell {
     pub(super) cell_id: CellId,
-    pub(super) handle: Weak<CoolConductorHandle>,
+    pub(super) parent: Weak<Mutex<CoolConductorInner>>,
 }
 
 impl CoolCell {
@@ -33,7 +34,7 @@ impl CoolCell {
         CoolZome::new(
             self.cell_id().clone(),
             zome_name.into(),
-            self.handle.clone(),
+            self.parent.clone(),
         )
     }
 
@@ -94,12 +95,12 @@ impl CoolCell {
             .expect("Failed to get cell environment")
     }
 
-    fn handle(&self) -> Arc<CoolConductorHandle> {
-        if let Some(handle) = self.handle.upgrade() {
-            handle
+    fn handle(&self) -> CoolConductorHandle {
+        if let Some(parent) = self.parent.upgrade() {
+            parent.lock().handle()
         } else {
             panic!(format!(
-                "Attempted to access conductor handle for CellId {}, but the conductor is shutdown",
+                "Attempted to access conductor parent for CellId {}, but the conductor is shutdown",
                 self.cell_id
             ));
         }
