@@ -11,6 +11,7 @@ pub(crate) struct KdActor {
     channel_factory: ghost_actor::actor_builder::GhostActorChannelFactory<Self>,
     i_s: ghost_actor::GhostSender<Internal>,
     keystore: KeystoreSender,
+    bindings: HashMap<Url2, ghost_actor::GhostSender<actor::KitsuneP2p>>,
 }
 
 impl ghost_actor::GhostControlHandler for KdActor {}
@@ -27,6 +28,7 @@ impl KdActor {
             channel_factory,
             i_s,
             keystore,
+            bindings: HashMap::new(),
         })
     }
 }
@@ -47,11 +49,14 @@ impl InternalHandler for KdActor {
     fn handle_attach_kitsune(
         &mut self,
         bound_urls: Vec<Url2>,
-        _p2p: ghost_actor::GhostSender<actor::KitsuneP2p>,
+        p2p: ghost_actor::GhostSender<actor::KitsuneP2p>,
         evt: futures::channel::mpsc::Receiver<event::KitsuneP2pEvent>,
     ) -> InternalHandlerResult<()> {
         println!("BOUND_URL: {:#?}", bound_urls);
         let attach_fut = self.channel_factory.attach_receiver(evt);
+        for url in bound_urls {
+            self.bindings.insert(url, p2p.clone());
+        }
         Ok(async move {
             attach_fut.await?;
             Ok(())
@@ -167,6 +172,11 @@ impl KdApiHandler for KdActor {
         }
         .boxed()
         .into())
+    }
+
+    fn handle_list_connection_urls(&mut self) -> KdApiHandlerResult<Vec<Url2>> {
+        let out = self.bindings.keys().map(|x| x.clone()).collect();
+        Ok(async move { Ok(out) }.boxed().into())
     }
 
     fn handle_generate_agent(&mut self) -> KdApiHandlerResult<KdHash> {

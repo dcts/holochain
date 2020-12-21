@@ -11,6 +11,7 @@ use kitsune_p2p::dependencies::*;
 use kitsune_p2p::*;
 use kitsune_p2p_types::dependencies::*;
 use std::sync::Arc;
+use std::collections::HashMap;
 use url2::*;
 
 mod error;
@@ -33,6 +34,9 @@ ghost_actor::ghost_chan! {
         /// - "bind_quic_local:kitnuse-quic://0.0.0.0:0"
         /// - "bind_quic_proxy:kitsune-poxy://YADA.."
         fn create_kitsune(config_directives: Vec<String>) -> ();
+
+        /// List connection URLs
+        fn list_connection_urls() -> Vec<Url2>;
 
         /// Create a new signature agent for use with Kd
         fn generate_agent() -> KdHash;
