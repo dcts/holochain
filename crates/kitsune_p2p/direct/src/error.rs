@@ -28,6 +28,12 @@ impl From<KitsuneP2pError> for KdError {
     }
 }
 
+impl From<KdError> for KitsuneP2pError {
+    fn from(e: KdError) -> Self {
+        KitsuneP2pError::other(e)
+    }
+}
+
 impl From<String> for KdError {
     fn from(s: String) -> Self {
         #[derive(Debug, thiserror::Error)]
@@ -50,6 +56,12 @@ impl From<&str> for KdError {
 
 impl From<KdError> for () {
     fn from(_: KdError) {}
+}
+
+impl From<std::io::Error> for KdError {
+    fn from(e: std::io::Error) -> Self {
+        Self::other(e)
+    }
 }
 
 impl From<sodoken::SodokenError> for KdError {

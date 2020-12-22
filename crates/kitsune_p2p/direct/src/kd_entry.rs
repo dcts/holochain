@@ -478,6 +478,7 @@ mod tests {
         let kd = spawn_kitsune_p2p_direct(KdConfig {
             persist_path: None,
             unlock_passphrase: sodoken::Buffer::new_memlocked(4)?,
+            directives: vec![],
         })
         .await?;
 
@@ -498,6 +499,7 @@ mod tests {
         let kd = spawn_kitsune_p2p_direct(KdConfig {
             persist_path: None,
             unlock_passphrase: sodoken::Buffer::new_memlocked(4)?,
+            directives: vec![],
         })
         .await?;
 

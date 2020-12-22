@@ -72,6 +72,26 @@ async fn loc_hash(d: &[u8]) -> KdResult<[u8; 4]> {
 #[derive(Clone, Eq)]
 pub struct KdHash(Arc<(String, once_cell::sync::OnceCell<[u8; 39]>)>);
 
+impl serde::Serialize for KdHash {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.0 .0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for KdHash {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(KdHash::from_str_unchecked(&String::deserialize(
+            deserializer,
+        )?))
+    }
+}
+
 impl std::cmp::PartialEq for KdHash {
     fn eq(&self, other: &Self) -> bool {
         self.0 .0.eq(&other.0 .0)
@@ -185,6 +205,16 @@ impl KdHash {
         ))))
     }
 
+    /// create an UNVALIDATED KdHash from raw str.
+    /// This is really only meant to be used internally from
+    /// sources that were previously validated.
+    pub fn from_str_unchecked<R: AsRef<str>>(s: R) -> Self {
+        Self(Arc::new((
+            s.as_ref().to_string(),
+            once_cell::sync::OnceCell::new(),
+        )))
+    }
+
     /// create an UNVALIDATED KdHash from raw bytes.
     /// This is really only meant to be used internally from
     /// sources that were previously validated.
@@ -246,6 +276,51 @@ impl KdHash {
             Ok(r) => r,
             Err(_) => false,
         }
+    }
+}
+
+impl From<Arc<KitsuneSpace>> for KdHash {
+    fn from(o: Arc<KitsuneSpace>) -> Self {
+        let bytes = arrayref::array_ref![&o, 0, 36];
+        Self::from_36_bytes_unchecked(bytes)
+    }
+}
+
+impl From<KdHash> for KitsuneSpace {
+    fn from(o: KdHash) -> Self {
+        Self(o.get_raw_bytes()[3..].to_vec())
+    }
+}
+
+impl From<KdHash> for Arc<KitsuneSpace> {
+    fn from(o: KdHash) -> Self {
+        KitsuneSpace::from(o).into()
+    }
+}
+
+impl From<&KitsuneAgent> for KdHash {
+    fn from(o: &KitsuneAgent) -> Self {
+        let bytes = arrayref::array_ref![&o.0, 0, 36];
+        Self::from_36_bytes_unchecked(bytes)
+    }
+}
+
+impl From<Arc<KitsuneAgent>> for KdHash {
+    fn from(o: Arc<KitsuneAgent>) -> Self {
+        let bytes = arrayref::array_ref![&o, 0, 36];
+        Self::from_36_bytes_unchecked(bytes)
+    }
+}
+
+impl From<KdHash> for KitsuneAgent {
+    fn from(o: KdHash) -> Self {
+        Self(o.get_raw_bytes()[3..].to_vec())
+    }
+}
+
+impl From<KdHash> for Arc<KitsuneAgent> {
+    fn from(o: KdHash) -> Self {
+        KitsuneAgent::from(o).into()
     }
 }
 
@@ -330,6 +405,7 @@ mod tests {
         let persist = spawn_persist(KdConfig {
             persist_path: None,
             unlock_passphrase: sodoken::Buffer::new_memlocked(4)?,
+            directives: vec![],
         })
         .await?;
         let keystore = spawn_keystore(persist).await?;

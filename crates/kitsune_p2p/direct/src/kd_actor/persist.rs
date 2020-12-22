@@ -5,6 +5,17 @@ ghost_actor::ghost_chan! {
     pub(crate) chan PersistApi<KdError> {
         fn store_sign_pair(pk: KdHash, sk: sodoken::Buffer) -> ();
         fn get_sign_secret(pk: KdHash) -> sodoken::Buffer;
+        fn store_agent_info(
+            root_agent: KdHash,
+            agent_info_signed: agent_store::AgentInfoSigned,
+        ) -> ();
+        fn get_agent_info(
+            root_agent: KdHash,
+            agent: KdHash,
+        ) -> agent_store::AgentInfoSigned;
+        fn query_agent_info(
+            root_agent: KdHash,
+        ) -> Vec<agent_store::AgentInfoSigned>;
     }
 }
 
@@ -73,8 +84,23 @@ impl Persist {
         // create the private key table
         con.execute(
             "CREATE TABLE IF NOT EXISTS sign_keypairs (
-                pub_key       BLOB PRIMARY KEY,
+                pub_key       TEXT UNIQUE PRIMARY KEY NOT NULL,
                 sec_key       BLOB NOT NULL
+            ) WITHOUT ROWID;",
+            NO_PARAMS,
+        )?;
+
+        // create the agent_info table
+        // NOTE - NOT using `WITHOUT ROWID` because row size may be > 200 bytes
+        // TODO - should we also store decoded agent_info fields?
+        //        that would give us additional query functionality.
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS agent_info (
+                root_agent              TEXT NOT NULL,
+                agent                   TEXT NOT NULL,
+                signature               BLOB NOT NULL,
+                agent_info              BLOB NOT NULL,
+                CONSTRAINT pk PRIMARY KEY (root_agent, agent)
             );",
             NO_PARAMS,
         )?;
@@ -90,7 +116,7 @@ impl Persist {
                 tx.prepare_cached("INSERT INTO sign_keypairs (pub_key, sec_key) VALUES (?1, ?2);")?;
 
             // TODO - the same dance we did with the encryption key above
-            ins.execute(params![&pk.get_hash_bytes()[..], &*sk.read_lock()])?;
+            ins.execute(params![pk.as_ref(), &*sk.read_lock()])?;
         }
 
         tx.commit()?;
@@ -102,7 +128,7 @@ impl Persist {
         let buffer = sodoken::Buffer::new_memlocked(64)?;
         self.con.query_row(
             "SELECT sec_key FROM sign_keypairs WHERE pub_key = ?1 LIMIT 1;",
-            params![&pk.get_hash_bytes()[..]],
+            params![pk.as_ref()],
             |row| {
                 // TODO - how do we make sure this stays secure??
                 if let types::ValueRef::Blob(b) = row.get_raw(0) {
@@ -136,5 +162,83 @@ impl PersistApiHandler for Persist {
     fn handle_get_sign_secret(&mut self, pk: KdHash) -> PersistApiHandlerResult<sodoken::Buffer> {
         let sk = self.query_keypair(&pk)?;
         Ok(async move { Ok(sk) }.boxed().into())
+    }
+
+    fn handle_store_agent_info(
+        &mut self,
+        root_agent: KdHash,
+        agent_info_signed: agent_store::AgentInfoSigned,
+    ) -> PersistApiHandlerResult<()> {
+        let tx = self.con.transaction()?;
+
+        let agent: KdHash = agent_info_signed.as_agent_ref().into();
+        let sig: &[u8] = &agent_info_signed.as_signature_ref().0;
+        let info: &[u8] = agent_info_signed.as_agent_info_ref();
+
+        {
+            let mut ins =
+                tx.prepare_cached("INSERT INTO agent_info (root_agent, agent, signature, agent_info) VALUES (?1, ?2, ?3, ?4);")?;
+
+            ins.execute(params![root_agent.as_ref(), agent.as_ref(), sig, info,])?;
+        }
+
+        tx.commit()?;
+
+        Ok(async move { Ok(()) }.boxed().into())
+    }
+
+    fn handle_get_agent_info(
+        &mut self,
+        root_agent: KdHash,
+        agent: KdHash,
+    ) -> PersistApiHandlerResult<agent_store::AgentInfoSigned> {
+        let (sig, info) = self.con.query_row(
+            "SELECT signature, agent_info FROM agent_info WHERE root_agent = ?1 AND agent = ?2 LIMIT 1;",
+            params![root_agent.as_ref(), agent.as_ref()],
+            |row| {
+                let sig: Vec<u8> = row.get(0)?;
+                let info: Vec<u8> = row.get(1)?;
+                Ok((sig, info))
+            },
+        )?;
+        let out = agent_store::AgentInfoSigned::try_new(agent.into(), sig.into(), info)?;
+        Ok(async move { Ok(out) }.boxed().into())
+    }
+
+    fn handle_query_agent_info(
+        &mut self,
+        root_agent: KdHash,
+    ) -> PersistApiHandlerResult<Vec<agent_store::AgentInfoSigned>> {
+        let tx = self.con.transaction()?;
+
+        let out = {
+            let mut stmt = tx.prepare(
+                "SELECT agent, signature, agent_info FROM agent_info WHERE root_agent = ?1;",
+            )?;
+
+            let res = stmt.query_map(params![root_agent.as_ref()], |row| {
+                let agent: Vec<u8> = row.get(0)?;
+                let sig: Vec<u8> = row.get(1)?;
+                let info: Vec<u8> = row.get(2)?;
+                Ok((agent, sig, info))
+            })?;
+
+            let mut out = Vec::new();
+
+            for r in res {
+                let (agent, sig, info) = r?;
+                out.push(agent_store::AgentInfoSigned::try_new(
+                    KitsuneAgent(agent),
+                    sig.into(),
+                    info,
+                )?);
+            }
+
+            out
+        };
+
+        tx.rollback()?;
+
+        Ok(async move { Ok(out) }.boxed().into())
     }
 }
