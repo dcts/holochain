@@ -4,18 +4,39 @@ use rusqlite::*;
 ghost_actor::ghost_chan! {
     pub(crate) chan PersistApi<KdError> {
         fn store_sign_pair(pk: KdHash, sk: sodoken::Buffer) -> ();
+
         fn get_sign_secret(pk: KdHash) -> sodoken::Buffer;
+
         fn store_agent_info(
             root_agent: KdHash,
             agent_info_signed: agent_store::AgentInfoSigned,
         ) -> ();
+
         fn get_agent_info(
             root_agent: KdHash,
             agent: KdHash,
         ) -> agent_store::AgentInfoSigned;
+
         fn query_agent_info(
             root_agent: KdHash,
         ) -> Vec<agent_store::AgentInfoSigned>;
+
+        fn store_entry(
+            root_agent: KdHash,
+            entry: KdEntry,
+        ) -> ();
+
+        fn get_entry(
+            root_agent: KdHash,
+            hash: KdHash,
+        ) -> KdEntry;
+
+        fn query_entries(
+            root_agent: KdHash,
+            created_at_start: DateTime<Utc>,
+            created_at_end: DateTime<Utc>,
+            dht_arc: dht_arc::DhtArc,
+        ) -> Vec<KdEntry>;
     }
 }
 
@@ -100,7 +121,29 @@ impl Persist {
                 agent                   TEXT NOT NULL,
                 signature               BLOB NOT NULL,
                 agent_info              BLOB NOT NULL,
-                CONSTRAINT pk PRIMARY KEY (root_agent, agent)
+                CONSTRAINT agent_info_pk PRIMARY KEY (root_agent, agent)
+            );",
+            NO_PARAMS,
+        )?;
+
+        // create the entries table
+        // NOTE - NOT using `WITHOUT ROWID` because row size may be > 200 bytes
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS entries (
+                root_agent    TEXT NOT NULL,
+                hash          TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                dht_loc       INT NOT NULL,
+                bytes         BLOB NOT NULL,
+                CONSTRAINT entries_pk PRIMARY KEY (root_agent, hash)
+            );",
+            NO_PARAMS,
+        )?;
+
+        // created_at + dht_loc index for queries
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS entries_query_idx ON entries (
+                root_agent, created_at, dht_loc
             );",
             NO_PARAMS,
         )?;
@@ -113,7 +156,7 @@ impl Persist {
 
         {
             let mut ins =
-                tx.prepare_cached("INSERT INTO sign_keypairs (pub_key, sec_key) VALUES (?1, ?2);")?;
+                tx.prepare("INSERT INTO sign_keypairs (pub_key, sec_key) VALUES (?1, ?2);")?;
 
             // TODO - the same dance we did with the encryption key above
             ins.execute(params![pk.as_ref(), &*sk.read_lock()])?;
@@ -177,7 +220,7 @@ impl PersistApiHandler for Persist {
 
         {
             let mut ins =
-                tx.prepare_cached("INSERT INTO agent_info (root_agent, agent, signature, agent_info) VALUES (?1, ?2, ?3, ?4);")?;
+                tx.prepare("INSERT INTO agent_info (root_agent, agent, signature, agent_info) VALUES (?1, ?2, ?3, ?4);")?;
 
             ins.execute(params![root_agent.as_ref(), agent.as_ref(), sig, info,])?;
         }
@@ -240,5 +283,135 @@ impl PersistApiHandler for Persist {
         tx.rollback()?;
 
         Ok(async move { Ok(out) }.boxed().into())
+    }
+
+    fn handle_store_entry(
+        &mut self,
+        root_agent: KdHash,
+        entry: KdEntry,
+    ) -> PersistApiHandlerResult<()> {
+        let tx = self.con.transaction()?;
+
+        {
+            let mut ins =
+                tx.prepare("INSERT INTO entries (root_agent, hash, created_at, dht_loc, bytes) VALUES (?1, ?2, ?3, ?4, ?5);")?;
+
+            ins.execute(params![
+                root_agent.as_ref(),
+                entry.hash().as_ref(),
+                entry.create(),
+                entry.hash().get_loc(),
+                entry.as_ref(),
+            ])?;
+        }
+
+        tx.commit()?;
+
+        Ok(async move { Ok(()) }.boxed().into())
+    }
+
+    fn handle_get_entry(
+        &mut self,
+        root_agent: KdHash,
+        hash: KdHash,
+    ) -> PersistApiHandlerResult<KdEntry> {
+        let bytes = self.con.query_row(
+            "SELECT bytes FROM entries WHERE root_agent = ?1 AND hash = ?2 LIMIT 1;",
+            params![root_agent.as_ref(), hash.as_ref()],
+            |row| {
+                let bytes: Vec<u8> = row.get(0)?;
+                Ok(bytes)
+            },
+        )?;
+
+        Ok(
+            async move { KdEntry::from_raw_bytes_validated(bytes.into_boxed_slice()).await }
+                .boxed()
+                .into(),
+        )
+    }
+
+    fn handle_query_entries(
+        &mut self,
+        root_agent: KdHash,
+        created_at_start: DateTime<Utc>,
+        created_at_end: DateTime<Utc>,
+        arc: dht_arc::DhtArc,
+    ) -> PersistApiHandlerResult<Vec<KdEntry>> {
+        if arc.half_length == 0 {
+            return Ok(async move { Ok(Vec::with_capacity(0)) }.boxed().into());
+        }
+
+        let tx = self.con.transaction()?;
+
+        let res = {
+            let dht_arc::ArcRange { start, end } = arc.range();
+
+            let start = match start {
+                std::ops::Bound::Included(u) => u,
+                _ => unreachable!(),
+            };
+
+            let end = match end {
+                std::ops::Bound::Included(u) => u,
+                _ => unreachable!(),
+            };
+
+            let mut stmt = if start <= end {
+                tx.prepare(
+                    "SELECT bytes FROM entries
+                        WHERE root_agent = ?1
+                        AND created_at >= ?2
+                        AND created_at <= ?3
+                        AND dht_loc >= ?4
+                        AND dht_loc <= ?5;",
+                )?
+            } else {
+                tx.prepare(
+                    "SELECT bytes FROM entries
+                        WHERE root_agent = ?1
+                        AND created_at >= ?2
+                        AND created_at <= ?3
+                        AND dht_loc <= ?4
+                        AND dht_loc >= ?5;",
+                )?
+            };
+
+            let res = stmt.query_map(
+                params![
+                    root_agent.as_ref(),
+                    created_at_start,
+                    created_at_end,
+                    start,
+                    end,
+                ],
+                |row| {
+                    let bytes: Vec<u8> = row.get(0)?;
+                    Ok(bytes.into_boxed_slice())
+                },
+            )?;
+
+            let mut out = Vec::new();
+
+            for r in res {
+                out.push(r?);
+            }
+
+            out
+        };
+
+        tx.rollback()?;
+
+        Ok(async move {
+            let mut out = Vec::new();
+
+            for r in res {
+                out.push(KdEntry::from_raw_bytes_validated(r).await?);
+            }
+
+            Ok(out)
+        }
+        .boxed()
+        .into())
     }
 }

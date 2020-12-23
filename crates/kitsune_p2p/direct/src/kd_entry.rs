@@ -2,7 +2,6 @@
 
 use crate::*;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use chrono::prelude::*;
 
 fn epoch_ms_to_chrono(epoch_ms: u64) -> DateTime<Utc> {
     let epoch = DateTime::from_utc(NaiveDate::from_ymd(1970, 1, 1).and_hms(0, 0, 0), Utc);
@@ -287,7 +286,7 @@ macro_rules! _impl_getters {
 
 impl KdEntry {
     /// Validated load from raw bytes
-    pub async fn from_raw_bytes_validated(b: Box<[u8]>, _pub_key: KdHash) -> KdResult<Self> {
+    pub async fn from_raw_bytes_validated(b: Box<[u8]>) -> KdResult<Self> {
         let entry = Self(Arc::new((b, KdArcSwap::new(), KdArcSwap::new())));
 
         // check the size data
@@ -377,7 +376,7 @@ impl KdEntryBuilder {
             .await?;
         this = this.set_signature(&sig);
 
-        KdEntry::from_raw_bytes_validated(this.0 .0.into_boxed_slice(), pub_key).await
+        KdEntry::from_raw_bytes_validated(this.0 .0.into_boxed_slice()).await
     }
 
     /// set the hash data of this instance
@@ -505,7 +504,7 @@ mod tests {
 
         let pk = kd.generate_agent().await?;
 
-        let other_hash = KdHash::from_bytes(&[0xdb; 32]).await?;
+        let other_hash = KdHash::from_bytes(Box::new([0xdb; 32])).await?;
 
         let e = KdEntry::builder()
             .set_sys_type(SysType::Create)

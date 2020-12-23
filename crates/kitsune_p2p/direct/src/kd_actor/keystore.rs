@@ -143,7 +143,8 @@ impl KdHash {
         let mut hash = Buffer::new(32);
         hash::generichash(&mut hash, &r, None).await?;
 
-        Self::from_bytes(hash.read_lock()).await
+        let r: Box<[u8]> = (&*hash.read_lock()).into();
+        Self::from_bytes(r).await
     }
 
     /// create a validated KdHash from an AsRef<str> item.
@@ -155,18 +156,18 @@ impl KdHash {
         }
         let d = base64::decode_config(&iter.collect::<Vec<_>>(), base64::URL_SAFE_NO_PAD)
             .map_err(KdError::other)?;
-        Self::from_bytes(d).await
+        Self::from_bytes(d.into()).await
     }
 
     /// create a validated KdHash from raw sodoken buffer.
     pub async fn from_sodoken(r: &Buffer) -> KdResult<Self> {
-        let r = r.read_lock().to_vec();
-        Self::from_bytes(&r).await
+        let r: Box<[u8]> = (&*r.read_lock()).into();
+        Self::from_bytes(r).await
     }
 
     /// create a validated KdHash from raw bytes.
-    pub async fn from_bytes<R: AsRef<[u8]>>(r: R) -> KdResult<Self> {
-        let r = r.as_ref();
+    pub async fn from_bytes(r: Box<[u8]>) -> KdResult<Self> {
+        let r = &r;
         let mut buf = [0_u8; 39];
         match r.len() {
             32 => {
